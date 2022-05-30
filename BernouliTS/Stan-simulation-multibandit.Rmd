@@ -1,0 +1,1180 @@
+---
+title: "Stan-simulation-multibandit"
+author: "Ziyan Wang"
+date: "23/01/2022"
+output:
+  pdf_document: default
+header-includes:
+  - \usepackage[ruled,vlined,linesnumbered]{algorithm2e}
+---
+
+
+
+Loading some packages required in this file:
+```{r setup, include=FALSE, echo=FALSE}
+library(ggplot2)
+
+library(reshape)
+
+library(parallel)
+
+library(rstan)
+
+rstan_options(auto_write = TRUE)
+options(mc.cores = parallel::detectCores(logical = FALSE))
+
+```
+
+# Brief introduction
+In this report, i will use Thompson sampling to solve multi-bandit problems. I will start with Bernoulli multi-bandit problem with beta(1,1) as a conjugate prior. I continue with binomial multi-bandit problem since patients are assigned in a group of size three to each treatment (dose). Since most of likelihood functions or model do not have conjugate priors, people usually do simulation to draw samples from posterior distributions. The popular and power algorithms of simulation is the Hamiltonian Monte-Carlo Markov Chain algorithm (HMC). Here, i will use its variant No-U-Turn Sampler (NUTS) which is the default method of rstan::sampling() function.
+
+
+
+
+# Bernouli and bionomial multi-bandit problem (Thompson sampling)
+I will first suppose that an binary outcome y of a trial (1: Success, 0: Fail). Assuming that there are K arms for comparison. For Bernoulli bandits problem, we assume $K\geq1$ bandits. There will be $N\geq 0$ times of treatment round. In each round n, researchers will select and apply an arm $k \in 1:K$ and receive a binary outcome $y_{k,n}$. I will use $z_n$ to represent the arm selected at the nth round. Here, we will assume that the outcome of the same arm are independent and identically distributed across the round n. The goal is to decide which arm to use based on the outcomes of the arms in previous rounds. Here the Thompson sampling method is used to determine which arm is the best.
+<!-- For each arm k $\in$ $\{1,...,K\}$, there are $N_k$ trials in which $y_k$ are number of successes. The model has a parameter $\theta_k\in(0,1)$ which represents the probability of success for each arm k. The goal is to determine which arm has the highest probability of success.  -->
+The outcome likelihood function is a Bernoulli pdf$$y_{k,n}\sim Bernouli(\theta_k) \sim Binomial(1,\theta_k).$$ I will use a vague prior for $\theta_k$ which is $$\theta_k \sim Beta(1,1).$$ According to conjugacy, the posterior distribution of $\theta_{k,n}$ is still a beta distribution which is $$\hat\theta_{k,n} \sim Beta(1+\sum_{p=1}^{n-1} y_{k,p},1+\sum_{p=1}^{n-1}[I[Applied\;arm\;k\;at\;round\;p]-y_{k,p}]),$$ where $y_{k,p}$ is the outcome of arm k at round pth round where $p\in 1:n-1$; $\theta_{k,n}$ is the success probability of arm k at the nth round; $I[Applied\;arm\;k\;at\;round\;p]$ indicates whether arm k was applied at the pth round (1: Applied, 0: Otherwise). If the arm k was not selected at the (n-1)th round, $y_{k,n-1}=0$ and $I[Applied\;arm\;k\;at\;round\;n-1]=0$. As the goal is to determine which arm is the best, the probability that arm k is the best given $y_{1:n-1}$ at the round n is $$Pr[arm\; k\; is\; the\; best\;at\;the\;nth\;round]=Pr[\theta_k=max\theta|y_{1:n},z_{1:n}]=E[I[\theta_{k}= max \theta]|y_{1:n},z_{1:n}].$$
+$$E[I[\theta_{k}=max \theta]|y_{1:n},z_{1:n}]=\int I[\theta_{k}=max \theta]\;p(\theta|y_{1:n},z_{1:n})\;d\theta \approx \frac{1}{M}\sum^{M}_{m=1}I[\theta_k^{(m)}= max\theta^{(m)}],$$ where $\theta^{(m)}$ is the draws from posterior distribution $p(\theta|y_{1:n},z_{1:n})$. For example, assuming two arms with $\theta_1$ and $\theta_2$. In the nth round of trial, there will be M posterior draws of $\theta_{k,n}$. For the mth $\in 1:M$ posterior draw, i will assign 1 to the arm with max $\theta$ ($I[\theta_k^{(m)}= max\theta^{(m)}]=1$) and 0 to the other arm ($I[\theta_k^{(m)}= max\theta^{(m)}]=0$). In stan, we usually set M to be 2000. Thus, we can calculate how many times arm k has a maximum $\theta$ for one trial. Here, we define a parameter $\phi_{n,k}$ representing the probability of selecting arm $k$ at the nth round. $$\phi_{k,n}=E[I[\theta_k= max\theta]]=\frac{1}{M}\sum^{M}_{m=1}I[\theta_k^{(m)}= max\theta^{(m)}].$$ The sum of $\phi_{k,n}$ at the nth round $\phi_{n}$ equals 1. $$\phi_n=\sum_{k=1}^K \phi_{k,n}=1$$
+
+# Thompson sampling algorithm for Bernoulli bandit
+Here is the algorithm:
+\begin{algorithm}[H]
+\DontPrintSemicolon
+\SetAlgoLined
+\  For each arm $k\in1,...,K$,set the prior $\theta_k\sim Beta(1,1)$\;
+\BlankLine
+\  for {$n\in1,2...,N$} do:\;
+
+\  For each arm k, generate samples $\theta_k$ from Beta distribution
+(When t = 1, samples are generated from Beta(1,1)) (Here we will generate 1000 samples for each arm)\;
+
+\  Apply arm k at nth step and we define this as $z_n$. $z_n=argmax_{k\in 1,...,K}\theta_{k,n}$
+(From step 3, We have 1000 samples for each arm. We can generate the proportion of each arm to have the max $\theta$)\;
+
+\  Receive an outcome $y_n \sim Bernouli(true\theta_k)$\;
+
+\  if $y_n=1$, then $success_k=success_k+1$\;
+
+\  $trials_k=trials_k+1$\;
+
+\  Back to Step 2: Noting that $\theta_k\sim Beta(success_k+1,trials_k-success_k+1$ from n = 2\;
+
+\caption{Thompson sampling Algorithm for beta - Bernoulli(Binomial) bandit problem}
+
+\end{algorithm}
+
+## Using R code to generate the posterior theta
+
+First, we will generate the dataset with true theta.
+```{r}
+
+K <- 3 #Here we use three arms
+
+AD_rate_of_each_dose=seq(0.2,0.4,0.1) #theta: Each arm has a true success probability
+
+for (i in 1:K){
+  cat("The AD event rate of dose",i,"is",AD_rate_of_each_dose[i],"\n")
+}
+
+MAX_N <- 500 # Recruiting at most 200 patients
+
+
+# dataset=matrix(rep(0),ncol = K,nrow = MAX_N) # Initializing the obs dataset
+# 
+# set.seed(31942318)
+# #Generating random data
+# 
+# for (k in 1:K){
+#     dataset[,k]=rbinom(MAX_N,1,AD_rate_of_each_dose[k])
+# }
+# colSums(dataset)/MAX_N
+```
+
+### Simplest TS 
+This is the simplest Thompson sampling which generate one random sample from posterior beta and select the dose with the highest value of posterior draw to be the next dose. I can not construct the probability to be the best arm when running this algorithm once. I think we can run the loop 'for (k in 1:K{}' 1000 time for each trial t. Then we can calculate how many times each arm will be selected to be the best arm in each trial and construct the probability. \textcolor{red}{check this with Dave, if this is correct we can compare simple TS, rbeta(1000) TS and stan TS using the plot.}
+```{r}
+  
+nsuccess=rep(0,K)
+ntotal=rep(0,K)
+armselected=integer(0)
+AD_rate_of_each_dose=seq(0.2,0.4,0.1)
+Selectarm3=0
+select3prob={}
+allop={}
+Trueselectarm3=0
+outputarmselected={}
+outputarmselected_greedy={}
+outthetah={}
+finaldecision_simpleTS={}
+finaldecision_greedy={}
+set.seed(31942318)
+for (i in 1: 1000){
+  nsuccess=rep(0,K)
+  ntotal=rep(0,K)
+  armselected=integer(0)
+  nsuccess_greedy=rep(0,K)
+  ntotal_greedy=rep(0,K)
+  armselected_greedy=integer(0)
+  
+  a=matrix(rep(0,MAX_N*K),ncol=K)
+  b=matrix(rep(0,MAX_N*K),ncol=K)
+  a_greedy=matrix(rep(0,MAX_N*K),ncol=K)
+  b_greedy=matrix(rep(0,MAX_N*K),ncol=K)
+  # randomtheta=matrix(rep(0,MAX_N*K),ncol=K)
+  
+  randomtheta={}
+  thetah={}
+  point_theta={}
+
+  # set.seed(31942318)
+  for (t in 1:MAX_N){
+    dose_to_choose=-1
+    max_theta=-1  
+  
+    for (k in 1:K){
+      a[t,k]=nsuccess[k]+1
+      b[t,k]=ntotal[k]+1-nsuccess[k]
+      a_greedy[t,k]=nsuccess_greedy[k]+1
+      b_greedy[t,k]=ntotal_greedy[k]+1-nsuccess_greedy[k]
+    
+      randomtheta=rbeta(1,a[t,k],b[t,k])
+
+    
+      if (randomtheta > max_theta){
+        max_theta = randomtheta
+        dose_to_choose = k
+      }
+    }
+    point_theta=rbind(point_theta,a_greedy[t,]/(a_greedy[t,]+b_greedy[t,]))
+    
+    armselected_greedy=append(armselected_greedy,which.max(point_theta[t,]))
+    arm_outcome_greedy=rbinom(1,1,AD_rate_of_each_dose[armselected_greedy[t]])
+    
+    armselected=append(armselected,dose_to_choose)
+    arm_outcome=rbinom(1,1,AD_rate_of_each_dose[dose_to_choose])
+
+    nsuccess[dose_to_choose]=nsuccess[dose_to_choose]+arm_outcome
+    ntotal[dose_to_choose]=ntotal[dose_to_choose]+1
+        
+    nsuccess_greedy[armselected_greedy[t]]=nsuccess_greedy[armselected_greedy[t]]+arm_outcome_greedy
+    ntotal_greedy[armselected_greedy[t]]=ntotal_greedy[armselected_greedy[t]]+1
+    # thetah=rbind(thetah,nsuccess/ntotal)
+  }
+  # outthetah=cbind(outthetah,thetah)
+  outputarmselected=rbind(outputarmselected,armselected)
+  outputarmselected_greedy=rbind(outputarmselected_greedy,armselected_greedy)
+  finaldecision_simpleTS=c(finaldecision_simpleTS,dose_to_choose)
+  finaldecision_greedy=c(finaldecision_greedy,armselected_greedy[t])
+}
+
+test<-outputarmselected
+test1<-outputarmselected_greedy
+
+probtab={}
+for (col in 1:ncol(test)){
+  tab=table(test[,col])/1000
+  probtab=rbind(probtab,tab)
+}
+
+probtab1={}
+for (col in 4:ncol(test1)){
+  tab1=table(test1[,col])/1000
+  probtab1=rbind(probtab1,tab1)
+}
+
+plot(probtab[,3],type="l", ylab="Allocation probability of d3", xlab="iter")
+lines(probtab1[,3],col="red")
+legend(400, 0.5, c("TS", "Greedy"),col=c("black","red"),lty=c(1,1))
+
+```
+These two plot track the arm selected in simplest TS for seed 1 and 2. Both of the seed do not select arm 3 as the best at the end. The value of P100 indicates the probability of selecting arm 3 as the best in the final 50 trials out of 100 trials when repeating the simplest TS 1000 times. This value is smaller than P100 when using more complex TS. However, i defined P100 differently in both methods. Thus, i don't think simplest TS and complex TS are comparable based on P100.
+
+
+<!-- ### Run simplest TS 1000 time for each trial -->
+
+<!-- ```{r} -->
+
+<!-- nsuccess=rep(0,K) -->
+<!-- ntotal=rep(0,K) -->
+<!-- armselected=integer(0) -->
+<!-- AD_rate_of_each_dose=seq(0.2,0.4,0.1) -->
+<!-- Selectarm3=0 -->
+<!-- select3prob={} -->
+<!-- allop={} -->
+<!-- z <- array(0.0, 0) -->
+<!-- # for (i in 1: 1000){ -->
+<!-- #   set.seed(i) -->
+<!-- #   nsuccess=rep(0,K) -->
+<!-- #   ntotal=rep(0,K) -->
+<!-- #   armselected=integer(0) -->
+<!-- a=matrix(rep(0,MAX_N*K),ncol=K) -->
+<!-- b=matrix(rep(0,MAX_N*K),ncol=K) -->
+<!-- # randomtheta=matrix(rep(0,MAX_N*K),ncol=K) -->
+<!-- randomtheta={} -->
+
+<!-- prob_best={} -->
+
+<!-- for (t in 1:MAX_N){ -->
+<!--   maxmatrix=matrix(0,nrow =1000,ncol=K) -->
+
+<!--   set.seed(31942318) -->
+
+<!--   for (i in 1:1000) { -->
+<!--   dose_to_choose=-1 -->
+<!--   max_theta=-1 -->
+
+<!--   for (k in 1:K){ -->
+<!--     a[t,k]=nsuccess[k]+1 -->
+<!--     b[t,k]=ntotal[k]+1-nsuccess[k] -->
+
+<!--     randomtheta=rbeta(1,a[t,k],b[t,k]) -->
+
+<!--     if (randomtheta > max_theta){ -->
+<!--       max_theta = randomtheta -->
+<!--       dose_to_choose = k -->
+<!--     } -->
+<!--   } -->
+<!--   maxmatrix[i,dose_to_choose]<-1 -->
+<!--   } -->
+<!--   prob_best=rbind(prob_best,colSums(maxmatrix)/1000) -->
+
+<!--   doseallocation=sample(K,1,replace=T,prob_best[t,]) -->
+
+<!--   z[t]=doseallocation -->
+
+<!--   # armselected=append(armselected,dose_to_choose) -->
+<!--   arm_outcome=dataset[t,z[t]] -->
+
+<!--   nsuccess[z[t]]=nsuccess[z[t]]+arm_outcome -->
+<!--   ntotal[z[t]]=ntotal[z[t]]+1 -->
+<!-- } -->
+
+<!-- ggplot(data.frame(trial = 1:MAX_N, Arm_3_allocation_prob = prob_best[1:MAX_N,3])) + -->
+<!--   geom_line(aes(trial, Arm_3_allocation_prob)) -->
+<!-- ``` -->
+
+<!-- ### Sample beta 1000 times and calculate allocation probability -->
+<!-- ```{r} -->
+
+<!-- nsuccess=rep(0,K) -->
+<!-- ntotal=rep(0,K) -->
+<!-- armselected=integer(0) -->
+<!-- AD_rate_of_each_dose=seq(0.2,0.4,0.1) -->
+<!-- Selectarm3=0 -->
+<!-- select3prob={} -->
+<!-- allop={} -->
+<!-- z <- array(0.0, 0) -->
+<!-- # for (i in 1: 1000){ -->
+<!-- #   set.seed(i) -->
+<!-- #   nsuccess=rep(0,K) -->
+<!-- #   ntotal=rep(0,K) -->
+<!-- #   armselected=integer(0) -->
+<!-- a=matrix(rep(0,MAX_N*K),ncol=K) -->
+<!-- b=matrix(rep(0,MAX_N*K),ncol=K) -->
+<!-- # randomtheta=matrix(rep(0,MAX_N*K),ncol=K) -->
+<!-- randomtheta={} -->
+
+<!-- prob_best={} -->
+
+<!-- for (t in 1:MAX_N){ -->
+<!--   maxmatrix=matrix(0,nrow =1000,ncol=K) -->
+
+<!--   set.seed(31942318) -->
+
+<!--   for (i in 1:1000) { -->
+<!--   dose_to_choose=-1 -->
+<!--   max_theta=-1 -->
+
+<!--   for (k in 1:K){ -->
+<!--     a[t,k]=nsuccess[k]+1 -->
+<!--     b[t,k]=ntotal[k]+1-nsuccess[k] -->
+
+<!--     randomtheta=rbeta(1,a[t,k],b[t,k]) -->
+
+<!--     if (randomtheta > max_theta){ -->
+<!--       max_theta = randomtheta -->
+<!--       dose_to_choose = k -->
+<!--     } -->
+<!--   } -->
+<!--   maxmatrix[i,dose_to_choose]<-1 -->
+<!--   } -->
+<!--   prob_best=rbind(prob_best,colSums(maxmatrix)/1000) -->
+
+<!--   doseallocation=sample(K,1,replace=T,prob_best[t,]) -->
+
+<!--   z[t]=doseallocation -->
+
+<!--   # armselected=append(armselected,dose_to_choose) -->
+<!--   arm_outcome=dataset[t,z[t]] -->
+
+<!--   nsuccess[z[t]]=nsuccess[z[t]]+arm_outcome -->
+<!--   ntotal[z[t]]=ntotal[z[t]]+1 -->
+<!-- } -->
+
+<!-- ggplot(data.frame(trial = 1:MAX_N, Arm_3_allocation_prob = prob_best[1:MAX_N,3])) + -->
+<!--   geom_line(aes(trial, Arm_3_allocation_prob)) -->
+<!-- ``` -->
+
+### Generate a thousand posterior theta at the same time TS 
+
+Here, i sampled 1000 posterior draws and constructed the probability of each arm to be best. Then i choose the next arm by sampling according to these probability. The sampling code is 'z1[n] <- sample(K, 1, replace = TRUE, allocation_prob[n,])'.
+```{r}
+
+theta <- seq(0.2,0.4,0.1)
+
+rbeta1000TS=function(iter,theta,N,seed){
+  
+  K=length(theta)
+  # dataset=matrix(rep(0),ncol = K,nrow = N) # Initializing the obs dataset
+
+  # set.seed(31942318)
+  # #Generating random data
+  # 
+  # for (k in 1:K){
+  #     dataset[,k]=rbinom(N,1,theta[k])
+  # }
+
+  outputallop={}  
+  True_selection=0
+  outputz1={}
+  outputy1={}
+  outputmean={}
+  outputalloptrace={}
+  outputfinaldecisionTS={}
+  outputtotaltreatTS={}
+  outputallocationTS={}
+  outputfinaldecision_greedy={}
+  outputtotaltreat_greedy={}
+  outputallocation_greedy={}
+  
+  
+  set.seed(seed)
+  for (i in 1:iter){
+
+
+    trials <- rep(0, K)
+    success <- rep(0, K)
+    trials_greedy <- rep(0, K)
+    success_greedy <- rep(0, K)
+    z1 <- array(0.0, 0)
+    y1 <- array(0.0, 0)
+    z1_greedy <- array(0.0, 0)
+    y1_greedy <- array(0.0, 0)
+    allocation_prob={}
+
+
+    for (n in 1:N) {
+      # set.seed(31942318)
+      B<-matrix(rbeta(1000*K, success+1, (trials-success)+1),1000, byrow = TRUE)
+      # B_greedy<-matrix(rbeta(1000*K, success_greedy+1, (trials_greedy-success_greedy)+1),1000, byrow = TRUE)
+      
+      P<-table(factor(max.col(B), levels=1:ncol(B)))/dim(B)[1]
+      # P_greedy<-table(factor(max.col(B_greedy), levels=1:ncol(B_greedy)))/dim(B_greedy)[1]
+      
+      allocation_prob<-rbind(allocation_prob, t(matrix(P)))
+
+
+      #Generate the arm to apply for this trial
+      z1[n] <- sample(K, 1, replace = TRUE, allocation_prob[n,])
+
+      thetahat=(success_greedy+1)/(trials_greedy+2)
+      
+      if (sum(thetahat==max(thetahat))>1){
+        arm=seq(1,K)
+        armTrue=arm[thetahat==max(thetahat)]
+        z1_greedy[n]=sample(armTrue,1,replace = T,prob = thetahat[armTrue])
+      }
+      else {z1_greedy[n] = as.numeric(which.max(thetahat))}
+
+      # Observe an outcome
+      y1[n] <- rbinom(1,1,theta[z1[n]])
+      
+      y1_greedy[n] <- rbinom(1,1,theta[z1_greedy[n]])
+
+      # Update the Rewards
+      success[z1[n]]<-success[z1[n]]+y1[n]
+      success_greedy[z1_greedy[n]]<-success_greedy[z1_greedy[n]]+y1_greedy[n]
+
+      #Update the Sent
+      trials[z1[n]]=trials[z1[n]]+1
+      
+      trials_greedy[z1_greedy[n]]=trials_greedy[z1_greedy[n]]+1
+      }
+    outputz1=rbind(outputz1,z1)
+    outputy1=rbind(outputy1,y1)
+    outputallop=rbind(outputallop,allocation_prob[N,])
+    outputalloptrace=cbind(outputalloptrace,allocation_prob)
+    outputmean=rbind(outputmean,success/trials)
+    outputfinaldecisionTS=c(outputfinaldecisionTS,z1[N])
+    outputtotaltreatTS=rbind(outputtotaltreatTS,table(z1))
+    outputallocationTS=rbind(outputallocationTS,z1)
+    
+    outputfinaldecision_greedy=c(outputfinaldecision_greedy,z1_greedy[N])
+    
+    # outputtotaltreat_greedy=rbind(outputtotaltreat_greedy,table(z1_greedy))
+    
+    outputallocation_greedy=rbind(outputallocation_greedy,z1_greedy)
+    
+    if (which.max(outputallop[i,])==3){
+      True_selection=True_selection+1
+      }
+    }
+  result=list(allop=outputallop,alloptrace=outputalloptrace,
+             trace_of_arm=outputz1,trace_of_obs=outputy1,
+             "Final estimate of theta"=outputmean,
+             "Final decision TS %"=table(outputfinaldecisionTS)/iter,
+             average_times_of_applied_TS=colSums(outputtotaltreatTS)/(iter),
+             "AllocationTS"=outputallocationTS,
+             "Final decision greedy %"=table(outputfinaldecision_greedy)/iter,
+             
+             # average_times_of_applied_greedy=colSums(outputtotaltreat_greedy)/(iter),  
+             
+             "Allocation_greedy"=outputallocation_greedy,
+             #The probability of selecting arm 3 as the best arm for each trial size
+             'P choose highest dose'=True_selection/iter)
+  colnames(result$allop)<-c("d1","d2","d3")
+  return(result)
+  }
+
+
+
+result_50=rbeta1000TS(iter=1000,theta,N=50,seed=31942318)
+result_100=rbeta1000TS(iter=1000,theta,N=100,seed=31942318)
+result_500=rbeta1000TS(iter=1000,theta,N=500,seed=31942318)
+# print(system.time(rbeta1000TS(iter=1000,theta,N=50,seed=31942318)))
+test=result_500[["AllocationTS"]]
+test1=result_500[["Allocation_greedy"]]
+
+probtabtest={}
+for (col in 1:ncol(test)){
+  tab=table(test[,col])/1000
+  probtabtest=rbind(probtabtest,tab)
+}
+
+probtabtest1={}
+for (col in 1:ncol(test1)){
+  tab1=table(test1[,col])/1000
+  probtabtest1=rbind(probtabtest1,tab1)
+}
+t=matrix(probtabtest,ncol=3)
+colnames(t)=c("d1","d2","d3")
+t1=matrix(probtabtest1,ncol=3)
+colnames(t1)=c("d1","d2","d3")
+
+tp=cbind(t,rep("TS",497))
+t1p=cbind(t1,rep("Greedy",497))
+
+tt=rbind(t,t1)
+
+# cbind(tt,c(rep("TS",497),rep("Greedy",497)))
+
+
+ref_G500 <- melt(t,value.name="allop") #Load reshape2 first
+
+ref_T500<- melt(t1,value.name="allop") #Load reshape2 first
+refnew={}
+refnew=rbind(ref_G500,ref_T500)
+
+refnew[,4]=c(rep("TS",1500),rep("Greedy",1500))
+
+ref_500<- melt(result_500$allop,value.name="allop") #Load reshape2 first
+colnames(refnew)=c("patient","doselevel","allop","Method")
+colnames(ref_100)=c("patient","doselevel","allop")
+colnames(ref_500)=c("seed","doselevel","allop")
+
+ggplot(data=refnew,aes(x=patient,y=allop,color=doselevel,linetype=Method))+geom_line()
+  ggtitle("Number of Trials is 50")
+
+plot(probtabtest[,3],type="l", ylab="Allocation probability of d3", xlab="sample")
+lines(probtabtest1[,3],col="red")
+legend(400, 0.5, c("TS", "Greedy"),col=c("black","red"),lty=c(1,1))
+
+result_100=rbeta1000TS(iter=1000,theta,N=100,seed=31942318)
+# print(system.time(rbeta1000TS(iter=1000,theta,N=100,seed=31942318)))
+# 
+# result_500=rbeta1000TS(iter=1000,theta,N=500,seed=31942318)
+# print(system.time(rbeta1000TS(iter=1000,theta,N=500,seed=31942318)))
+
+
+P50=result_50$`P choose highest dose`
+P100=result_100$`P choose highest dose`
+P500=result_500$`P choose highest dose`
+Prbeta=rbind(P50,P100,P500)
+
+finalgreedy50=result_50$`Final decision greedy %`
+finalgreedy100=result_100$`Final decision greedy %`
+finalgreedy500=result_500$`Final decision greedy %`
+
+finalgreedy=rbind(finalgreedy50,finalgreedy100,finalgreedy500)
+
+knitr::kable(Prbeta,caption = "Probability of arm 3 to have the highest allocation probability after finishing the trials")
+
+knitr::kable(finalgreedy,caption = "finalgreedy")
+
+ref_50 <- melt(result_50$allop,value.name="allop") #Load reshape2 first
+ref_100<- melt(result_100$allop,value.name="allop") #Load reshape2 first
+ref_500<- melt(result_500$allop,value.name="allop") #Load reshape2 first
+
+
+colnames(ref_50)=c("seed","doselevel","allop")
+colnames(ref_100)=c("seed","doselevel","allop")
+colnames(ref_500)=c("seed","doselevel","allop")
+
+
+ggplot(data=ref_50,aes(x=seed,y=allop,color=doselevel))+geom_line()+
+  ggtitle("Number of Trials is 50")
+ggplot(data=ref_100,aes(x=seed,y=allop,color=doselevel))+geom_line()+
+  ggtitle("Number of Trials is 100")
+ggplot(data=ref_500,aes(x=seed,y=allop,color=doselevel))+geom_line()+
+  ggtitle("Number of Trials is 500")
+
+boxplot(result_50$allop,main="Number of Trials is 50",
+        xlab="Doses",ylab="Allocation probability")
+boxplot(result_100$allop,main="Number of Trials is 100",
+        xlab="Doses",ylab="Allocation probability")
+# boxplot(result_500$allop,main="Number of Trials is 500",
+#         xlab="Doses",ylab="Allocation probability")
+
+```
+For each seed i out of 1000, I selected the allocation probability of the 50th trials and plotted the allocation probability verse seed. As we can see, the final allocation probabilities of the best arm (arm 3) in color blue was separated from the other two doses in the first three plots. Also, the more trials we use, the final allocation probabilities of arm 3 are close to 1. The probability of arm 3 has the highest probability after finishing all trials increases as the trial size grows. The boxplot also support this conclusion.
+
+## Using stan to generate posterior theta 
+
+Now we are going to write stan codes to represent the process above. I will assume that the posterior distribution of this example is intractable. Then i will assume that the posterior distribution which is beta distribution is known according to conjugacy.
+
+<!-- ### Model each y with a bernouli distribution  -->
+
+<!-- ```{stan output.var="bernoulli_bandit"} -->
+<!-- data { -->
+<!--   int<lower=1> K; // number of  arms -->
+<!--   int<lower=0> N; // number of trials -->
+<!--   int<lower=1, upper=K> z[N]; // arm on trial n -->
+<!--   int<lower=0, upper=1> y[N]; // outcome on trial n -->
+<!-- } -->
+<!-- parameters { -->
+<!--   vector<lower=0, upper=1>[K] theta; // arm return prob -->
+<!-- } -->
+<!-- model { -->
+<!--   theta ~ beta(1,1); //Prior of theta -->
+<!--   y ~ bernoulli(theta[z]); //Assuming i.i.d. for each arm. -->
+<!--   //Each time we apply arm k, the outcome follows the same distribution and -->
+<!--   //does not depend on last observation -->
+<!-- } -->
+<!-- generated quantities { -->
+<!--   simplex[K] times_to_be_best; // phi_{n} = times_to_be_best[n] = sum(phi_{n,k})=1 -->
+<!--   //for k in 1...K which is the length of this simplex. -->
+<!--   { -->
+<!--     real best_prob = max(theta); -->
+<!--     for (k in 1 : K) { // Due to 1000 burn-in samples, and 3000 iterations, -->
+<!--     // there will be 2000 times comparison for each round n. -->
+<!--       times_to_be_best[k] = theta[k] >= best_prob; -->
+<!--     } -->
+<!--     times_to_be_best /= sum(times_to_be_best); -->
+<!--   } -->
+<!-- } -->
+<!-- ``` -->
+
+
+
+<!-- Then i write the code for Thompson sampling, in which the stan code above is used to sample the theta and generate the probability of arm selection in the next tern n+1. -->
+
+<!-- ```{r} -->
+
+<!-- theta_hat <- matrix(0, MAX_N, K) # Initializing the theta_hat matrix -->
+<!-- p_best <- matrix(0, MAX_N, K) # Initializing the allocation matrix -->
+
+<!-- y <- array(0.0, 0) #Initializing observation array for each arm at round n -->
+<!-- z <- array(0.0, 0) #Initializing selected arm array at round n -->
+
+<!-- set.seed(31942318) -->
+<!-- for (n in 1:MAX_N) { -->
+
+<!--   # Data generation for stan -->
+<!--   data <- list(K = K, N = n - 1, y = array(y, dim = n - 1), z = array(z, dim = n - 1)) -->
+<!--   #At the beginning (n = 1) we have no obs -->
+
+<!--   # Sampling from posterior distribution -->
+<!-- fit <- rstan::sampling(bernoulli_bandit, data = data, chains = 1, refresh=0, -->
+<!--                        warmup=1000, iter=2000, -->
+<!--                        init = 0, control = list(stepsize=0.1, adapt_delta=0.99)) -->
+
+<!--   #Collecting allocation probability and the estimation of theta for each arm. -->
+<!--   p_best[n, ] <- summary(fit, pars="times_to_be_best")$summary[ , "mean"] -->
+<!--   theta_hat[n, ] <- summary(fit, pars="theta")$summary[ , "mean"] -->
+
+<!--   # Selecting arm according to the allocation probability. -->
+<!--   z[n] <- sample(K, 1, replace = TRUE, p_best[n, ]) -->
+<!--   # z[n] <- as.numeric(which.max(p_best[n,])) -->
+
+<!--   # At n = 1, the allocation probability are around 1/K for all arm, meaning that -->
+<!--   # each arm are selected with approximately equal probability. -->
+
+
+<!--   # Here we use the data generated previously. -->
+<!--   # y[n] <- rbinom(1, 1, theta[z[n]]) -->
+<!--   y[n] <- dataset[n,z[n]] -->
+<!-- } -->
+
+<!-- #Times of applying each arm k -->
+<!-- table(z) -->
+
+<!-- # Checking the trace of arm 3 allocation probability in the whole period. -->
+<!-- ggplot(data.frame(trial = 1:MAX_N, Arm_3_allocation_prob = p_best[1:MAX_N,3])) + -->
+<!--   geom_line(aes(trial, Arm_3_allocation_prob)) -->
+
+
+<!-- ``` -->
+<!-- The trace plot of allocation probability of the arm 3 suggests that arm 3 was recognized to have highest theta. -->
+
+<!-- ### Assuming the outcome of the same arm are independent and identically distributed across the round n treat the results as binomial distribution -->
+
+<!-- As we assume that the outcome of the same arm are independent and identically distributed across the round n, we may transfer the Bernoulli to binomial. In stan, $y \sim bernoulli(theta[z])$ loops over all observations of each arm. For example, assuming that we have applied arm k for 200 times and observe 60 successes. If we use $y \sim bernoulli(theta[z])$ in stan, it will loops 200 observations for arm k to do generate posterior distribution of $\theta_k$. This can be transferred to how many successes have been observed in 200 trials. In stan, we may use $success \sim binomial(trials,theta)$. The stan code for binomial alternative is: -->
+
+<!-- ```{stan output.var="bernoulli_bandit_binomial_alternative"} -->
+<!-- data { -->
+<!--   int<lower=1> K; // number of arms -->
+<!--   int<lower=0> N; // number of trials -->
+<!--   int<lower=1, upper=K> z[N]; // arm on trial n -->
+<!--   int<lower=0, upper=1> y[N]; // outcome on trial n -->
+<!-- } -->
+
+<!-- transformed data { -->
+<!--   int<lower=0> successes[K] = rep_array(0, K); //Initializing an array of success for each arm -->
+<!--   int<lower=0> trials[K] = rep_array(0, K); //Initializing an array of trials for each arm -->
+<!--   // At the beginning, there is no trial and no success -->
+
+<!--   for (n in 1 : N) { -->
+<!--     trials[z[n]] += 1; //Each round for applied arm z[n] = k, we treat one patient -->
+<!--     successes[z[n]] += y[n]; //Each round for applied arm z[n] = k, we observe one outcome -->
+<!--   } -->
+<!-- } -->
+
+<!-- parameters { -->
+<!--   vector<lower=0, upper=1>[K] theta; // arm return prob -->
+<!-- } -->
+<!-- model { -->
+<!--   theta ~ beta(1,1); //Prior of theta -->
+<!--   successes ~ binomial(trials,theta); //Assuming i.i.d. for each arm. -->
+<!--   //I transfer loops of Bernoulli to binomial. -->
+<!-- } -->
+<!-- generated quantities { -->
+<!--   simplex[K] times_to_be_best; // phi_{n} = times_to_be_best[n] = sum(phi_{n,k})=1 -->
+<!--   //for k in 1...K which is the length of this simplex. -->
+<!--   { -->
+<!--     real best_prob = max(theta); -->
+<!--     for (k in 1 : K) { // Due to 1000 burn-in samples, and 3000 iterations, -->
+<!--     // there will be 2000 times comparison for each round n. -->
+<!--       times_to_be_best[k] = theta[k] >= best_prob; -->
+<!--     } -->
+<!--     times_to_be_best /= sum(times_to_be_best); -->
+<!--   } -->
+<!-- } -->
+<!-- ``` -->
+<!-- Assuming that we observed the same dataset called "dataset". The result of trace is: -->
+<!-- ```{r} -->
+<!-- theta_hat <- matrix(0, MAX_N, K) # Initializing the theta_hat matrix -->
+<!-- p_best <- matrix(0, MAX_N, K) # Initializing the allocation matrix -->
+
+<!-- y <- array(0.0, 0) #Initializing observation array for each arm at round n -->
+<!-- z <- array(0.0, 0) #Initializing selected arm array at round n -->
+
+<!-- set.seed(31942318) -->
+<!-- for (n in 1:MAX_N) { -->
+
+<!--   # Data generation for stan -->
+<!--   data <- list(K = K, N = n - 1, y = array(y, dim = n - 1), z = array(z, dim = n - 1)) -->
+<!--   #At the beginning (n = 1) we have no obs -->
+
+<!--   # Sampling from posterior distribution -->
+<!--   fit <- rstan::sampling(bernoulli_bandit_binomial_alternative, data = data, -->
+<!--                          chains = 1, refresh=0, warmup=1000, iter=2000, -->
+<!--                          init = 0, control = list(stepsize=0.1, adapt_delta=0.99)) -->
+
+<!--   #Collecting allocation probability and the estimation of theta for each arm. -->
+<!--   p_best[n, ] <- summary(fit, pars="times_to_be_best")$summary[ , "mean"] -->
+<!--   theta_hat[n, ] <- summary(fit, pars="theta")$summary[ , "mean"] -->
+
+<!--   # Selecting arm according to the allocation probability. -->
+<!--   z[n] <- sample(K, 1, replace = TRUE, p_best[n, ]) -->
+<!--   # At n = 1, the allocation probability are around 1/K for all arm, meaning that -->
+<!--   # each arm are selected with approximately equal probability. -->
+
+
+<!--   # Here we use the data generated previously. -->
+<!--   # y[n] <- rbinom(1, 1, theta[z[n]]) -->
+<!--   y[n] <- dataset[n,z[n]] -->
+<!-- } -->
+
+<!-- #Times of applying each arm k -->
+<!-- table(z) -->
+
+<!-- # Checking the trace of arm 3 allocation probability in the whole period. -->
+<!-- ggplot(data.frame(trial = 1:MAX_N, Arm_3_allocation_prob = p_best[1:MAX_N,3])) + -->
+<!--   geom_line(aes(trial, Arm_3_allocation_prob)) -->
+
+<!-- ``` -->
+<!-- As we can see, they generate the same trace plot. -->
+
+<!-- ### Generate posterior theta from beta in stan, according to conjugacy -->
+
+<!-- For Bernoulli or binomial distribution with beta prior, we know that the posterior distribution of $\theta$ is also a beta distribution. In our example, the prior is beta(1,1). Thus, the posterior distribution of $\theta_k$ is $$\theta_k \sim Beta(successes_k+1,trials_k-successes_k+1),$$ where $trials_k = N_k\in 1:N\\ successes_k=n_k\in1:N_k$. The Thompson sampling algorithm indicates that each time, we need to generate $\theta_k$ from posterior distribution which is $Beta(successes_k+1,trials_k-successes_k+1)$. In stan we will generate $\theta_k$ for 2000 times as default with 1000 burned samples. We will use $algorithm ="Fixed_param"$ when sampling random $\theta_k$ in stan because there is no parameter block. We do not estimate any parameter from model, and only generate random $\theta_k$ from posterior distribution. We can also do random $\theta_k$ generation in R instead of stan and then using Thompson sampling to select and apply the arm k. -->
+<!-- ```{stan output.var="bernoulli_bandit_conjugate"} -->
+
+<!-- data { -->
+<!--   int <lower=1>K; // number of arms -->
+<!--   int <lower=0>N; // number of trials -->
+<!--   int z[N]; // arm applied on trial n -->
+<!--   int y[N]; // outcome on trial n -->
+<!-- } -->
+
+<!-- transformed data { -->
+<!--   int successes[K] = rep_array(0, K); -->
+<!--   int trials[K] = rep_array(0, K); -->
+<!--   for (n in 1:N) { -->
+<!--     trials[z[n]] += 1; -->
+<!--     successes[z[n]] += y[n]; -->
+<!--   } -->
+<!-- } -->
+<!-- generated quantities { -->
+<!--   simplex[K] is_the_best; -->
+<!--   vector<lower=0, upper=1>[K] theta; -->
+<!--   for (k in 1:K) -->
+<!--     theta[k] = beta_rng(1 + successes[k], 1 + trials[k] - successes[k]); -->
+<!--     //Generating random theta_k from beta posterior. -->
+<!--   { -->
+<!--     real best_prob = max(theta); -->
+<!--     for (k in 1:K) -->
+<!--     is_the_best[k] = (theta[k] >= best_prob); -->
+<!--     is_the_best /= sum(is_the_best); -->
+<!--   } -->
+<!-- } -->
+
+<!-- ``` -->
+
+
+<!-- ```{r} -->
+<!-- theta <- seq(0.2,0.4,0.1) -->
+
+<!-- rbeta1000TSHMC=function(iter,theta,MAX_N,seed){ -->
+
+<!--   K=length(theta) -->
+<!--   # dataset=matrix(rep(0),ncol = K,nrow = MAX_N) # Initializing the obs dataset -->
+<!--   #  -->
+<!--   # set.seed(31942318) -->
+<!--   # #Generating random data -->
+<!--   #  -->
+<!--   # for (k in 1:K){ -->
+<!--   #     dataset[,k]=rbinom(MAX_N,1,theta[k]) -->
+<!--   # } -->
+
+<!--   outputallop_TS={} -->
+<!--   True_selection_TS=0 -->
+<!--   outputz_TS={} -->
+<!--   outputy_TS={} -->
+<!--   outputmean_TS={} -->
+<!--   outputalloptrace_TS={} -->
+<!--   outputfinaldecisionTS={} -->
+<!--   outputtotaltreatTS={} -->
+<!--   outputallocationTS={} -->
+
+<!--   outputfinaldecision_greedy={} -->
+<!--   outputtotaltreat_greedy={} -->
+<!--   outputallocation_greedy={} -->
+
+<!-- set.seed(seed) -->
+<!--   for (i in 1:iter){ -->
+
+
+<!--     theta_hat_greedy <- matrix(0, MAX_N, K) # Initializing the theta_hat matrix -->
+
+<!--     theta_hat <- matrix(0, MAX_N, K) # Initializing the theta_hat matrix -->
+<!--     p_best <- matrix(0, MAX_N, K) # Initializing the allocation matrix -->
+
+<!--     y <- array(0.0, 0) #Initializing observation array for each arm at round n -->
+<!--     z <- array(0.0, 0) #Initializing selected arm array at round n -->
+
+<!--     z_greedy <- array(0.0, 0) -->
+<!--     y_greedy <- array(0.0, 0) -->
+
+<!--     #The seed does not control the random number generator the same way as that in rbeta. If i -->
+<!--     #set iter to 10, the first value of each theta are not the same as that in rbeta generator. -->
+
+
+<!--     for (n in 1:MAX_N) { -->
+
+<!--       data <- list(K = K, N = n - 1, y = array(y, dim = n - 1), z =array(z, dim = n - 1)) -->
+<!--       # data_greedy <- list(K = K, N = n - 1, y = array(y_greedy, dim = n - 1), z =array(z_greedy, dim = n - 1)) -->
+
+<!--       fit <- sampling(bernoulli_bandit_conjugate, data = data, algorithm = "Fixed_param", -->
+<!--                        warmup = 0, chains = 1, iter = 1000, refresh = 0) -->
+<!--       # fit_greedy <- sampling(bernoulli_bandit_conjugate, data = data_greedy, algorithm = "Fixed_param", -->
+<!--       #                  warmup = 0, chains = 1, iter = 1000, refresh = 0)       -->
+<!--       p_best[n, ] <- -->
+<!--          summary(fit, pars="is_the_best")$summary[ , "mean"] -->
+<!--       theta_hat[n, ] <- -->
+<!--         summary(fit, pars="theta")$summary[ , "mean"]       -->
+<!--       # theta_hat_greedy[n, ] <- -->
+<!--       #   summary(fit_greedy, pars="theta")$summary[ , "mean"] -->
+
+<!--       # z_greedy[n]<-which.max(theta_hat_greedy[n,]) -->
+<!--       # y_greedy[n]<-rbinom(1,1,theta_hat_greedy[z_greedy[n]]) -->
+
+<!--       z[n] <- sample(K, 1, replace = TRUE, p_best[n, ]) -->
+<!--       # y[n] <- rbinom(1, 1, theta[z[n]]) -->
+<!--       y[n] <- rbinom(1,1,theta[z[n]]) -->
+
+<!--       } -->
+<!--     outputallop_TS=rbind(outputallop_TS,p_best[MAX_N,]) -->
+<!--     outputalloptrace_TS=cbind(outputalloptrace_TS,p_best) -->
+<!--     outputmean_TS=rbind(outputmean_TS,theta_hat[n,]) -->
+<!--     outputz_TS=rbind(outputz_TS,z) -->
+<!--     outputy_TS=rbind(outputy_TS,y) -->
+<!--     outputfinaldecisionTS=c(outputfinaldecisionTS,z[n]) -->
+<!--     outputtotaltreatTS=rbind(outputtotaltreatTS,table(z)) -->
+<!--     outputallocationTS=rbind(outputallocationTS,z) -->
+
+<!--     # outputfinaldecision_greedy=c(outputfinaldecision_greedy,z_greedy[n]) -->
+<!--     # outputtotaltreat_greedy=rbind(outputtotaltreat_greedy,table(z_greedy)) -->
+<!--     # outputallocation_greedy=rbind(outputallocation_greedy,z_greedy) -->
+
+
+<!--     if (which.max(outputallop_TS[i,])==3){ -->
+<!--       True_selection_TS=True_selection_TS+1 -->
+<!--       } -->
+<!--   } -->
+<!--   result=list(allop=outputallop_TS,alloptrace=outputalloptrace_TS, -->
+<!--              trace_of_arm=outputz_TS,trace_of_obs=outputy_TS, -->
+<!--              "Final estimate of theta"=outputmean_TS, -->
+<!--              "Final decision %"=table(outputfinaldecisionTS)/iter, -->
+<!--              average_times_of_applied=colSums(outputtotaltreatTS)/(iter), -->
+<!--              "Allocation"=outputallocationTS,   -->
+
+<!--              # "Final decision greedy %"=table(outputfinaldecision_greedy)/iter, -->
+<!--              # average_times_of_applied_greedy=colSums(outputtotaltreat_greedy)/(iter),   -->
+<!--              # "Allocation_greedy"=outputallocation_greedy, -->
+
+<!--              'P choose highest dose'=True_selection_TS/iter) -->
+<!--   colnames(result$allop)<-c("d1","d2","d3") -->
+<!--   return(result) -->
+<!-- } -->
+
+<!-- result_50_TS<-rbeta1000TSHMC(1000,theta,50,seed=31942318) -->
+<!-- # print(system.time(rbeta1000TSHMC(1000,theta,50,seed=31942318))) -->
+<!-- result_100_TS<-rbeta1000TSHMC(1000,theta,100,seed=31942318) -->
+<!-- # print(system.time(rbeta1000TSHMC(1000,theta,100,seed=31942318))) -->
+
+<!-- result_50_TS$`P choose highest dose` -->
+<!-- result_100_TS$`P choose highest dose` -->
+
+
+<!-- ref_50_TS <- melt(result_50_TS$allop,value.name="allop") #Load reshape2 first -->
+<!-- ref_100_TS<- melt(result_100_TS$allop,value.name="allop") #Load reshape2 first -->
+
+<!-- colnames(ref_50_TS)=c("seed","doselevel","allop") -->
+<!-- colnames(ref_100_TS)=c("seed","doselevel","allop") -->
+
+
+<!-- ggplot(data=ref_50_TS,aes(x=seed,y=allop,color=doselevel))+geom_line()+ -->
+<!--   ggtitle("Number of Trials is 50") -->
+<!-- ggplot(data=ref_100_TS,aes(x=seed,y=allop,color=doselevel))+geom_line()+ -->
+<!--   ggtitle("Number of Trials is 100") -->
+
+
+<!-- boxplot(result_50_TS$allop,main="Number of Trials is 50", -->
+<!--         xlab="Doses",ylab="Allocation probability") -->
+<!-- boxplot(result_100_TS$allop,main="Number of Trials is 100", -->
+<!--         xlab="Doses",ylab="Allocation probability") -->
+
+<!-- ``` -->
+Trial size 500 takes a lot of time, thus i will only test trial size equals 50 and 100. The result of stan random beta generator is similar to the results of rbeta in R. I think TS is reliable because it selects correct arm most of time when the trial size is over 50.
+
+
+<!-- \textcolor{red}{Question: When comparing rbeta() with rstan::sampling(bernoulli_bandit_conjugate), they should generate similar results. However, setting a specific seed does not generate the same result... Also, for N = 200 round, the probability of Thompson sampling to recommend the correct arm at the end is around 85%... I have run a loop of seed to check this. Does this suggest that the algorithm is not very very accurate. If i set a larger N, the accuracy does not change...} -->
+
+
+<!-- # Repeat the simulation in the paper. -->
+
+<!-- ## Brief introduction  -->
+
+<!-- In the paper, they defined the toxicity probability of dose k as $$p_k(\beta_0,\beta_1)=\psi(k,\beta_0,\beta_1)=\frac{1}{1+e^{-\beta_0-\beta_1u_k}}=Inverse\;logit(\alpha)$$ where $\alpha=\beta_0+\beta_1\,u_k$. $u_k$ is called the effective dose for each dose level $k\in 1:K$. The prior distribution of $\beta_0$ and $\beta_1$ are $$\beta_0\sim N(0,100)\; and \; \beta_1\sim Exp(1)$$ in this paper. In my example code, i will use $$\beta_0\sim N(0,1)\; and \; \beta_1\sim Exp(1)$$ to make its result comparable to the result generated by another two parameter logistic model (See the next part). In CRM model, physician usually define a prior guess on toxicity probability for each dose. The set of these prior guess is called skeleton. For each dose k: $\psi(k,\bar\beta_0,\bar\beta_1)$ = $p_k^0\in p^0=[0.06,0.12,0.20,0.30,0.40,0.50]$. $\bar\beta_0,\bar\beta_1$ are prior mean of the hyperparameter. The target toxicity is 0.3. $u_k$ can be calculated as $$u_k=\frac{log\frac{p_0}{1-p_0}-\bar \beta_0}{\bar \beta_1}.$$ Thus $u_k=[-2.75,-1.99,-1.39,-0.85,-0.41,0]$. When compiling stan code, we need to use $u_k$ to generate the toxicity probability and estimate $\beta_0$ and $\beta_1$.  -->
+<!-- In Bernoulli-beta multi-bandit problem example code, we believe that the toxicity probability $\theta$ follows beta distribution. In dose finding problem, we believe that $\theta$ follows a two parameter logistic model with two hyperparameters $\beta_0$ and $\beta_1$. Thus, in stan code, we first need to construct toxicity probability parameter $\theta_k$ for each dose level. After that, we need to set the prior believe of hyperparameters $\beta_0$ and $\beta_1$. Finally, we need to construct the likelihood of outcome which is the same as what we have done in bernoulli bandit problem. In this paper, the author defined a binary outcome y (0: No Toxicity; 1: Toxicity). In clinical trial, we will use \textcolor{red}{Dose-Limiting toxicity (DLT)} to describe the toxicity. DLT is defined to be a toxicity that prevents further administration of the agent at that dose level.   -->
+<!-- The selection method in Bernoulli multi-bandit problem samples the arm according to the probability of $\theta_k$ to have the highest posterior draws from beta distribution in stan, which is $$Pr[\theta_k=max\theta|y_{1:n},z_{1:n}].$$ In dose finding problem, the goal is to find the dose with toxicity probability that is closest to the target toxicity probability. This dose is called maximum tolerated dose (MTD) which is defined as the highest dose of a medicine or treatment that will produce the desired effect without resulting in unacceptable side effects. The posterior probability that dose k is the MTD is $$q_k(n)=Pr[k={\underset{l}{\mathrm{argmin}}|\theta_{target}-p_l(\beta_0,\beta_1)|}\;|y_{1:n},z_{1:n}]$$ In this paper, the author use posterior samples of $\beta_0$ and $\beta_1$ to compute approximations $\hat q_k(n)$ of $q_k(n)$ and then select the next dose $z_{n+1}\sim \hat q(n)$. Thus, in stan they will a vector of parameter which represents $q_k(n)$. Then they will use R to sample the next dose according to the posterior probability $q_k(n)$.  -->
+<!-- Another method of selection is to draw one sample $(\tilde \beta_0(n),\tilde\beta_1(n))$ from posterior distribution of $(\beta_0,\beta_1)$ called $\pi_t$, and select the MTD in the sampled model: $$(\tilde \beta_0(n),\tilde\beta_1(n)) \sim \pi_t,\\D_{n+1}\sim \underset{k\in 1...K}{\mathrm{argmin} {|\theta-p_k(\tilde \beta_0(n),\tilde\beta_1(n))|}}$$  -->
+<!-- The selection method used in my example is the same as the method in the Bernoulli-beta multi-bandit problem. I used posterior samples $(\tilde \beta_0(n),\tilde\beta_1(n))$, for example 1000 samples, to approximate $$\hat q_k(n)=Pr[k={\underset{l}{\mathrm{argmin}}|\theta_{target}-p_l(\beta_0,\beta_1)|}\;|y_{1:n},z_{1:n}].$$ Then, i will sample the next dose $D_{n+1}\sim \hat q(n)$. I think that this is thet same as the first method the author raised in the paper. \textcolor{red}{The problem is that i can not generate the approximation in stan due to an error in generated quantities when using abs function.} Luckily, i can still use R code to do approximation. -->
+
+<!-- ## Two parameter logistic model with Normal and exponential prior -->
+
+<!-- Here is the code for two parameter logistic model with Normal prior for $\beta_0$ and exponential prior for $\beta_1$. -->
+<!-- ```{stan output.var="Twoparameter_logisticmodel"} -->
+
+<!-- data { -->
+<!--   real beta_0_prior_mean; -->
+<!--   real beta_1_prior_mean; -->
+<!--   real beta_0_prior_sd; -->
+<!--   int <lower=1>K; // number of arms -->
+<!--   int <lower=0>N; // number of trials -->
+<!--   int <lower=0, upper=K> z[N]; // arm applied on trial n -->
+<!--   int <lower=0, upper=1> y[N]; // outcome on trial n -->
+<!--   real <lower=0, upper=1> skeleton[K]; // Prior toxicity probability -->
+
+<!-- } -->
+
+<!-- transformed data { -->
+<!--   // In CRM model, physician usually define a prior guess -->
+<!--   // on toxicity probability for each dose called skeleton. -->
+<!--   // In this paper, skeleton was defined as [0.06,0.12,0.20,0.30,0.40,0.50] -->
+<!--   // Based on prior mean of hyperparameter beta_0 and beta_1, we can easily -->
+<!--   // calculate the coded-dose for each dose level. -->
+<!--   real codeddose[K]; -->
+<!--   for (k in 1:K){ -->
+<!--   codeddose[k]=(logit(skeleton[k])-beta_0_prior_mean)/beta_1_prior_mean; -->
+<!--   } -->
+
+<!--   //int successes[K] = rep_array(0, K); -->
+<!--   //int trials[K] = rep_array(0, K); -->
+<!--   //for (n in 1:N) { -->
+<!--   //  trials[z[n]] += 1; -->
+<!--   //  successes[z[n]] += y[n]; -->
+<!--   //} -->
+<!-- } -->
+<!-- parameters{ -->
+<!--   real beta0; -->
+<!--   real beta1; -->
+<!-- } -->
+
+<!-- transformed parameters{ -->
+<!--   vector <lower=0,upper=1>[K] tox_prob; -->
+<!--   for (k in 1:K){ -->
+<!--   //inv_logit(beta_0+beta_1*codeddose[k]) represents the toxicity probability. -->
+<!--   tox_prob[k]=inv_logit(beta0+beta1*codeddose[k]); -->
+<!--   } -->
+<!-- } -->
+
+<!-- model{ -->
+<!--   // Prior for beta_0 and beta_1 -->
+<!--   // In this paper, the prior mean of beta_0 is 0, sd = 100. -->
+<!--   // Prior mean of beta_1 is 1. -->
+<!--   beta0 ~ normal(beta_0_prior_mean,beta_0_prior_sd); -->
+<!--   beta1 ~ exponential(beta_1_prior_mean); -->
+<!--   // The outcome of nth trial follows Bernoulli distribution -->
+<!--   // with toxicity probability of the arm used in the nth trial. -->
+<!--   // There will be a loop with size N for each y[n] ~ bernoulli(tox_prob[z[n]]), -->
+<!--   // where n is in 1:N. -->
+<!--   y ~ bernoulli(tox_prob[z]); -->
+<!-- } -->
+<!-- ``` -->
+
+<!-- ```{r} -->
+<!-- p0=c(0.06,0.12,0.20,0.30,0.40,0.50) -->
+<!-- K=length(p0) -->
+<!-- ptrue=c(0.05,0.12,0.15,0.30,0.45,0.50) -->
+<!-- for (i in 1:K){ -->
+<!--   cat("The AD event rate of dose",i,"is",ptrue[i],"\n") -->
+<!-- } -->
+
+<!-- MAX_N <- 100 # Recruiting at most 100 patients -->
+
+
+<!-- dataset=matrix(rep(0),ncol = K,nrow = MAX_N) # Initializing the obs dataset -->
+
+<!-- set.seed(31942318) -->
+<!-- #Generating random data -->
+
+<!-- for (k in 1:K){ -->
+<!--     dataset[,k]=rbinom(MAX_N,1,ptrue[k]) -->
+<!-- } -->
+
+
+<!-- target=0.3 -->
+<!-- beta_0_prior_mean=0 -->
+<!-- beta_0_prior_sd=1 -->
+<!-- beta_1_prior_mean=1 -->
+
+<!-- y <- array(0.0, 0) -->
+<!-- z <- array(0.0, 0) -->
+
+<!-- TSprob<-matrix(0,MAX_N,K) -->
+
+<!-- for (n in 1:MAX_N){ -->
+<!-- data=list(K = K, N = n - 1, -->
+<!--          y = array(y, dim = n - 1), z = array(z, dim = n - 1), -->
+<!--          skeleton=p0, -->
+<!--          target=target, -->
+<!--          beta_0_prior_mean=beta_0_prior_mean, -->
+<!--          beta_0_prior_sd=beta_0_prior_sd, -->
+<!--          beta_1_prior_mean=beta_1_prior_mean) -->
+<!-- fit <- rstan::sampling(Twoparameter_logisticmodel, data = data, chains = 1, refresh=0, -->
+<!--                        warmup=2500, iter=5000) -->
+
+<!-- samp=rstan::extract(fit,'tox_prob')[[1]] -->
+<!-- #-------------------Normal CRM design selection----------------------------- -->
+<!-- greedyselection_probtox=colMeans(samp) -->
+<!-- greedyassign=which.min(abs(greedyselection_probtox-data$target)) -->
+<!-- #-------------------Thompson sampling selection----------------------- -->
+<!-- for (q in 1: K){ -->
+<!-- TSprob[n,q]=(sum(max.col(-abs(samp-data$target))==q))/2500 -->
+<!-- } -->
+<!-- TSselection=sample(K,1,replace=T,TSprob[n,]) -->
+<!-- z[n]=TSselection -->
+<!-- # z[n]=greedyassign -->
+<!-- #-------------------Apply arm selected----------------- -->
+<!-- y[n]=dataset[n,z[n]] -->
+<!-- } -->
+<!-- # Checking the trace of arm 3 allocation probability in the whole period. -->
+<!-- ggplot(data.frame(trial = 1:MAX_N, Arm_4_allocation_prob = TSprob[1:MAX_N,4])) + -->
+<!--  geom_line(aes(trial, Arm_4_allocation_prob)) -->
+
+<!-- ``` -->
+
+<!-- ## Two parameter logistic model with Normal and Normal prior -->
+
+<!-- In CRM design, the two parameter logistic model is $$logit(p_n)=\beta_0+exp(\beta_1)u_k.$$ Thus, the tox_prob[k] in stan for each dose level k can be calculated by running tox_prob[k] = inv_logit(beta0+exp(beta1) * codeddose[k]. For $p^0=[0.06,0.12,0.20,0.30,0.40,0.50]$ with prior distribution of $\beta_0$ and $\beta_1$ to be $$\beta_0\sim N(0,1)\; and \; \beta_1\sim N(0,1).$$ $u_k$ can be calculated as $$u_k=\frac{log\frac{p_0}{1-p_0}-\bar \beta_0}{ exp(\bar\beta_1)}.$$ Thus, $u_k=[-2.75,-1.99,-1.39,-0.85,-0.41,0]$. -->
+
+<!-- Here is the code for two parameter logistic model with Normal prior for $\beta_0$ and normal prior for $\beta_1$. -->
+<!-- ```{stan output.var="Twoparameter_logisticmodel_standard_CRM"} -->
+
+<!-- data { -->
+<!--   real beta_0_prior_mean; -->
+<!--   real beta_1_prior_mean; -->
+<!--   real beta_0_prior_sd; -->
+<!--   real beta_1_prior_sd; -->
+<!--   int <lower=1>K; // number of arms -->
+<!--   int <lower=0>N; // number of trials -->
+<!--   int <lower=0, upper=K> z[N]; // arm applied on trial n -->
+<!--   int <lower=0, upper=1> y[N]; // outcome on trial n -->
+<!--   real <lower=0, upper=1> skeleton[K]; // Prior toxicity probability -->
+
+<!-- } -->
+
+<!-- transformed data { -->
+<!--   // In CRM model, physician usually define a prior guess -->
+<!--   // on toxicity probability for each dose called skeleton. -->
+<!--   // In this paper, skeleton was defined as [0.06,0.12,0.20,0.30,0.40,0.50] -->
+<!--   // Based on prior mean of hyperparameter beta_0 and beta_1, we can easily -->
+<!--   // calculate the coded-dose for each dose level. -->
+<!--   real codeddose[K]; -->
+<!--   for (k in 1:K){ -->
+<!--   codeddose[k]=(logit(skeleton[k])-beta_0_prior_mean)/exp(beta_1_prior_mean); -->
+<!--   } -->
+
+<!--   //int successes[K] = rep_array(0, K); -->
+<!--   //int trials[K] = rep_array(0, K); -->
+<!--   //for (n in 1:N) { -->
+<!--   //  trials[z[n]] += 1; -->
+<!--   //  successes[z[n]] += y[n]; -->
+<!--   //} -->
+<!-- } -->
+<!-- parameters{ -->
+<!--   real beta0; -->
+<!--   real beta1; -->
+<!-- } -->
+
+<!-- transformed parameters{ -->
+<!--   vector <lower=0,upper=1>[K] tox_prob; -->
+<!--   for (k in 1:K){ -->
+<!--   //inv_logit(beta_0+beta_1*codeddose[k]) represents the toxicity probability. -->
+<!--   tox_prob[k]=inv_logit(beta0+exp(beta1)*codeddose[k]); -->
+<!--   } -->
+<!-- } -->
+
+<!-- model{ -->
+<!--   // Prior for beta_0 and beta_1 -->
+<!--   // In this paper, the prior mean of beta_0 is 0, sd = 100. -->
+<!--   // Prior mean of beta_1 is 1, sd=1. -->
+<!--   beta0 ~ normal(beta_0_prior_mean,beta_0_prior_sd); -->
+<!--   beta1 ~ normal(beta_1_prior_mean,beta_1_prior_sd); -->
+<!--   // The outcome of nth trial follows Bernoulli distribution -->
+<!--   // with toxicity probability of the arm used in the nth trial. -->
+<!--   // There will be a loop with size N for each y[n] ~ bernoulli(tox_prob[z[n]]), -->
+<!--   // where n is in 1:N. -->
+<!--   y ~ bernoulli(tox_prob[z]); -->
+<!-- } -->
+<!-- ``` -->
+
+
+
+<!-- ```{r} -->
+<!-- p0=c(0.06,0.12,0.20,0.30,0.40,0.50) -->
+<!-- K=length(p0) -->
+<!-- ptrue=c(0.05,0.12,0.15,0.30,0.45,0.50) -->
+<!-- for (i in 1:K){ -->
+<!--   cat("The AD event rate of dose",i,"is",ptrue[i],"\n") -->
+<!-- } -->
+
+<!-- MAX_N <- 100 # Recruiting at most 100 patients -->
+
+
+<!-- dataset=matrix(rep(0),ncol = K,nrow = MAX_N) # Initializing the obs dataset -->
+
+<!-- set.seed(31942318) -->
+<!-- #Generating random data -->
+
+<!-- for (k in 1:K){ -->
+<!--     dataset[,k]=rbinom(MAX_N,1,ptrue[k]) -->
+<!-- } -->
+
+
+<!-- target=0.3 -->
+<!-- beta_0_prior_mean=0 -->
+<!-- beta_0_prior_sd=1 -->
+<!-- beta_1_prior_mean=0 -->
+<!-- beta_1_prior_sd=1 -->
+
+<!-- y <- array(0.0, 0) -->
+<!-- z <- array(0.0, 0) -->
+
+<!-- TSprob<-matrix(0,MAX_N,K) -->
+
+<!-- for (n in 1:MAX_N){ -->
+<!-- data=list(K = K, N = n - 1, -->
+<!--          y = array(y, dim = n - 1), z = array(z, dim = n - 1), -->
+<!--          skeleton=p0, -->
+<!--          target=target, -->
+<!--          beta_0_prior_mean=beta_0_prior_mean, -->
+<!--          beta_0_prior_sd=beta_0_prior_sd, -->
+<!--          beta_1_prior_mean=beta_1_prior_mean, -->
+<!--          beta_1_prior_sd=beta_1_prior_sd) -->
+<!-- fit <- rstan::sampling(Twoparameter_logisticmodel_standard_CRM, data = data, chains = 1, refresh=0, -->
+<!--                        warmup=2500, iter=5000) -->
+
+<!-- samp=rstan::extract(fit,'tox_prob')[[1]] -->
+<!-- #-------------------Normal CRM design selection----------------------------- -->
+<!-- greedyselection_probtox=colMeans(samp) -->
+<!-- greedyassign=which.min(abs(greedyselection_probtox-data$target)) -->
+<!-- #-------------------Thompson sampling selection----------------------- -->
+<!-- for (q in 1: K){ -->
+<!-- TSprob[n,q]=(sum(max.col(-abs(samp-data$target))==q))/2500 -->
+<!-- } -->
+<!-- TSselection=sample(K,1,replace=T,TSprob[n,]) -->
+<!-- z[n]=TSselection -->
+<!-- # z[n]=greedyassign -->
+<!-- #-------------------Apply arm selected----------------- -->
+<!-- y[n]=dataset[n,z[n]] -->
+<!-- } -->
+<!-- # Checking the trace of arm 3 allocation probability in the whole period. -->
+<!-- ggplot(data.frame(trial = 1:MAX_N, Arm_4_allocation_prob = TSprob[1:MAX_N,4])) + -->
+<!--  geom_line(aes(trial, Arm_4_allocation_prob)) -->
+
+<!-- ``` -->
+
+<!-- \textcolor{red}{The code with problem when constructing posterior probability of selection in stan} -->
+
+<!-- generated quantities { -->
+<!--   simplex[K] times_to_be_best; // phi_{n} = times_to_be_best[n] = sum(phi_{n,k})=1 -->
+<!--   //for k in 1...K which is the length of this simplex. -->
+<!--   { -->
+<!--   // Here 0.3 is the target, we want to minimize the gap -->
+<!--   // between toxicity probability of each dose and target. -->
+<!--   vector [K] gap; -->
+<!--   for (k in 1:K){ -->
+<!--    gap[k] =  abs(tox_prob[k]-0.3); -->
+<!--   } -->
+<!--   real closest_prob = min(gap); -->
+<!--     for (k in 1 : K) { // Due to 1000 burn-in samples, and 3000 iterations, -->
+<!--     // there will be 2000 times comparison for each round n. -->
+<!--       times_to_be_best[k] = tox_prob[k] <= closest_prob; -->
+<!--     } -->
+<!--     times_to_be_best /= sum(times_to_be_best); -->
+<!--   } -->
+<!-- } -->
