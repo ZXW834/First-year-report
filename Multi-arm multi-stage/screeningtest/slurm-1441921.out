@@ -1,0 +1,36 @@
+Running SLURM prolog script on red301.cluster.local
+===============================================================================
+Job started on Fri May 27 15:25:28 BST 2022
+Job ID          : 1441921
+Job name        : typeIerrorbetabinomial_with_informative_prior.slurm
+WorkDir         : /mainfs/home/zw7g20/Platform/screeningtest
+Command         : /mainfs/home/zw7g20/Platform/screeningtest/typeIerrorbetabinomial_with_informative_prior.slurm
+Partition       : batch
+Num hosts       : 1
+Num cores       : 40
+Num of tasks    : 40
+Hosts allocated : red301
+Job Output Follows ...
+===============================================================================
+Hello from Slurm
+Loading compiler version 2021.2.0
+==============================================================================
+Running epilogue script on red301.
+
+Submit time  : 2022-05-27T15:24:28
+Start time   : 2022-05-27T15:25:28
+End time     : 2022-05-27T15:26:32
+Elapsed time : 00:01:04 (Timelimit=02:00:00)
+
+Job ID: 1441921
+Cluster: i5
+User/Group: zw7g20/pj
+State: COMPLETED (exit code 0)
+Nodes: 1
+Cores per node: 40
+CPU Utilized: 00:02:44
+CPU Efficiency: 6.41% of 00:42:40 core-walltime
+Job Wall-clock time: 00:01:04
+Memory Utilized: 459.81 MB
+Memory Efficiency: 0.29% of 156.25 GB
+

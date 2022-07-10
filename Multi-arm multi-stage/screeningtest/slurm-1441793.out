@@ -1,0 +1,36 @@
+Running SLURM prolog script on red124.cluster.local
+===============================================================================
+Job started on Fri May 27 14:54:25 BST 2022
+Job ID          : 1441793
+Job name        : typeIerrorlogistic_with_informative_prior.slurm
+WorkDir         : /mainfs/home/zw7g20/Platform/screeningtest
+Command         : /mainfs/home/zw7g20/Platform/screeningtest/typeIerrorlogistic_with_informative_prior.slurm
+Partition       : batch
+Num hosts       : 1
+Num cores       : 40
+Num of tasks    : 40
+Hosts allocated : red124
+Job Output Follows ...
+===============================================================================
+Hello from Slurm
+Loading compiler version 2021.2.0
+==============================================================================
+Running epilogue script on red124.
+
+Submit time  : 2022-05-27T14:51:27
+Start time   : 2022-05-27T14:54:25
+End time     : 2022-05-27T15:17:23
+Elapsed time : 00:22:58 (Timelimit=02:00:00)
+
+Job ID: 1441793
+Cluster: i5
+User/Group: zw7g20/pj
+State: COMPLETED (exit code 0)
+Nodes: 1
+Cores per node: 40
+CPU Utilized: 14:09:54
+CPU Efficiency: 92.51% of 15:18:40 core-walltime
+Job Wall-clock time: 00:22:58
+Memory Utilized: 17.63 GB
+Memory Efficiency: 11.29% of 156.25 GB
+

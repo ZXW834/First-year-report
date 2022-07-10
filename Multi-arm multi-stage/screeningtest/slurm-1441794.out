@@ -1,0 +1,36 @@
+Running SLURM prolog script on red033.cluster.local
+===============================================================================
+Job started on Fri May 27 14:57:20 BST 2022
+Job ID          : 1441794
+Job name        : typeIerrorlogistic_with_vague_prior.slurm
+WorkDir         : /mainfs/home/zw7g20/Platform/screeningtest
+Command         : /mainfs/home/zw7g20/Platform/screeningtest/typeIerrorlogistic_with_vague_prior.slurm
+Partition       : batch
+Num hosts       : 1
+Num cores       : 40
+Num of tasks    : 40
+Hosts allocated : red033
+Job Output Follows ...
+===============================================================================
+Hello from Slurm
+Loading compiler version 2021.2.0
+==============================================================================
+Running epilogue script on red033.
+
+Submit time  : 2022-05-27T14:51:28
+Start time   : 2022-05-27T14:57:20
+End time     : 2022-05-27T15:19:22
+Elapsed time : 00:22:02 (Timelimit=02:00:00)
+
+Job ID: 1441794
+Cluster: i5
+User/Group: zw7g20/pj
+State: COMPLETED (exit code 0)
+Nodes: 1
+Cores per node: 40
+CPU Utilized: 13:31:38
+CPU Efficiency: 92.09% of 14:41:20 core-walltime
+Job Wall-clock time: 00:22:02
+Memory Utilized: 17.06 GB
+Memory Efficiency: 10.92% of 156.25 GB
+
